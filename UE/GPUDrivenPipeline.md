@@ -91,3 +91,60 @@
 
 
 
+#### Compute Shader
+
+不需要通过图形流水线也可以直接利用GPU的硬件单元的并行计算
+
+（1）与传统渲染管线的比较：
+
+- 传统渲染管线
+  - CommandProcessor接收CPU发送的渲染绘制命令
+  - 将命令转发给Graphics Processor单元，这些单元将顶点着色器需要运算的任务提交给GPU中的Compute Unit(在英伟达中被称未SM, Streaming MultiProcessor)
+  - 光栅化阶段，由Rasterizer光栅化器完成，完成后继续回到Compute Unit中进行着色
+  - 最后渲染完成的Render Target提交给FrameBuffer
+
+- 计算着色器
+  - 同样接受CommandBuffer发送的执行命令
+  - 直接将指令提交到ComputeUnit开始计算，不需要经过GraphicsProcessor和其他图形管线单元处理
+
+（2）Compute Shader运行方式
+
+- 硬件基础
+  - SIMDUnit + LocalDataShared + ScalarRegister/VectorRegister(寄存器)  $\rightarrow$ Compute Unit
+- 简单CS例子
+  - 每个ComputeUnit都对应执行一个ThreadGroup工作
+  - ThreadGroup中每个Thread都会打包成WaveFront的形式发送给SIMD
+    - AMD 64线程打包为一个WaveFront
+    - 英伟达32线程打包为一个Wrap
+  - numthreads线程组包含线程个数时应设置为wavefront的整数倍
+
+```c++
+#pragma kernel CSMain // CSMain是执行的compute kernel函数名
+
+RWTexture2D<float4> Result; // CS中可读写纹理
+
+[numthreads(8,2,4)]  // 线程组中的线程数,4张横向长度8竖向长度未2的表格
+void CSMain(uint3 id : SV_DispatchThreadID){
+    Result[id.xy] = float4(id.x & id.y, (id.x&15)/15.0, (id.y&15)/15.0, 0.0)
+}
+```
+
+```c#
+// C#端
+var mainKernel = _filterComputeShader.FindKernel(_kernelName);
+ComputeShader.GetKernelThreadGroupSizes(mainKernel, out uint xGroupSize, out uint yGroupSize, out _);
+// 使用多少个ThreadGroup, (4,3,2)表示4*3*2个线程组，2张横向长度为4竖向长度未3的表格，表格的每一格都是一个numthread(8,2,4)的threadgroup
+cmd.DispatchCompute(ComputeShader, mainKernel, 4, 3, 2);
+```
+
+- 线程间数据交换
+  - 两个ThreadGroup之间交换数据会通过L2缓存
+  - ThreadGroup内两个线程交换数据时会通过Local Data Share(LDS)速度非常快
+
+- Vector Register & Scalar Register
+  - non-uniform：有些变量在不同线程间有不同的数值，变量在线程中独立。每个变量需要 $64\times$ size_of_variable空间
+  - uniform：有些变量在不同线程间完全相同，变量在线程间是共享的，我们称之为uniform。每个变量只需要 $1\times$ size_of_variable空间
+
+- 注意事项
+  - 如果一个线程组只分配了4个线程，一个WaveFront依旧会打包64个线程，SIMD一次执行16个线程所以为了这个WaveFront执行了4此，绝大部分都是空算
+  - 避免在Compute Shader中出现分支
